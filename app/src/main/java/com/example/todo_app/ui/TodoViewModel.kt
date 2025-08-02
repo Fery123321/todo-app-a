@@ -15,7 +15,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
- * UI contract/state for add/edit screen.
+ * UI contract/state for the Add/Edit screen.
+ *
+ * Fields
+ * - id: null when creating a new item; set when editing an existing one.
+ * - title/description: user-editable text inputs.
+ * - isEditing: true when editing an existing item; false when adding.
+ * - isSaving: transient flag to prevent duplicate actions while persisting.
+ * - titleError: validation message for title (null when valid).
  */
 data class AddEditUiState(
     val id: Long? = null,
@@ -28,38 +35,56 @@ data class AddEditUiState(
 
 /**
  * One-off UI events for snackbars/navigation.
+ *
+ * These are consumed by the UI and are not part of persistent screen state.
  */
 sealed interface UiEvent {
+    /** Request to show a transient message (e.g., snackbar). */
     data class ShowMessage(val message: String) : UiEvent
+    /** Request to navigate back to the previous screen. */
     data object NavigateBack : UiEvent
 }
 
 /**
- * ViewModel for the TODO app.
- * - Exposes a flow of todo list from repository
- * - Handles add, edit, delete, toggle complete
+ * MVVM ViewModel coordinating TODO feature UI state and actions.
+ *
+ * Responsibilities
+ * - Expose a StateFlow list of todos for the list screen.
+ * - Maintain Add/Edit screen state, validate input, and persist via repository.
+ * - Emit one-off UI events for feedback and navigation.
+ *
+ * Coroutines/Flow
+ * - Uses viewModelScope for structured concurrency.
+ * - Collects repository.observeTodos() and exposes it as StateFlow with stateIn.
  */
 class TodoViewModel(
     private val repository: TodoRepository
 ) : ViewModel() {
 
-    // List screen: stream of todos
+    // List screen: stream of todos (hot StateFlow derived from repository Flow)
     val todos: StateFlow<List<TodoEntity>> =
         repository.observeTodos()
             .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     // Add/Edit screen state
     private val _addEdit = MutableStateFlow(AddEditUiState())
+    /** Public, immutable state for Add/Edit screen collected by Compose. */
     val addEdit: StateFlow<AddEditUiState> = _addEdit.asStateFlow()
 
     // One-off UI events
     private val _events = Channel<UiEvent>(Channel.BUFFERED)
+    /** Stream of one-off events such as snackbars and navigation. */
     val events: Flow<UiEvent> = _events.receiveAsFlow()
 
+    /** Initialize state for creating a new item. */
     fun startAdd() {
         _addEdit.value = AddEditUiState()
     }
 
+    /**
+     * Load an existing item for editing.
+     * Emits a message and requests navigation back if the item is not found.
+     */
     fun startEdit(id: Long) {
         viewModelScope.launch {
             val entity = repository.getById(id)
@@ -77,14 +102,21 @@ class TodoViewModel(
         }
     }
 
+    /** Update title as user types; clears any existing title error. */
     fun onTitleChange(newTitle: String) {
         _addEdit.value = _addEdit.value.copy(title = newTitle, titleError = null)
     }
 
+    /** Update description as user types. */
     fun onDescriptionChange(newDesc: String) {
         _addEdit.value = _addEdit.value.copy(description = newDesc)
     }
 
+    /**
+     * Validate and persist current Add/Edit state.
+     * - Enforces non-empty trimmed title.
+     * - Emits success/failure messages and navigates back on success.
+     */
     fun save() {
         val current = _addEdit.value
         val title = current.title.trim()
@@ -121,6 +153,7 @@ class TodoViewModel(
         }
     }
 
+    /** Delete the given item by id; emits feedback via events. */
     fun delete(id: Long) {
         viewModelScope.launch {
             try {
@@ -132,6 +165,7 @@ class TodoViewModel(
         }
     }
 
+    /** Toggle completion state for the given item id; emits error message on failure. */
     fun toggleCompleted(id: Long, completed: Boolean) {
         viewModelScope.launch {
             try {
